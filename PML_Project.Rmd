@@ -1,0 +1,247 @@
+---
+title: "Prediction Assignment"
+author: "Paul Houghton"
+date: "Wednesday, July 22, 2015"
+output: html_document
+---
+
+#Introduction
+The practical machine learning Course project takes the data from the source: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) to try an predict how well subjects (6 in the study) completed the exercises. Subjects were ask to complete an exercise in 5 different manners (as described in the source link)
+The final goal of the prediction model is to *"predict the manner in which they did the exercise"*.
+The exercises were performed and classified as follows: 
+*exactly according to the specification (Class A)
+*throwing the elbows to the front (Class B)
+*lifting the dumbbell only halfway (Class C)
+*lowering the dumbbell only halfway (Class D)
+*throwing the hips to the front (Class E)
+Class A matches to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+##Data loading
+The first step in the process is to download the data from the links provided and confirm that the training and testing match. The required r packages were also loaded in this step.
+
+```{r data_entry, warning=FALSE}
+library('caret'); library('rattle'); library('rpart.plot'); library('randomForest'); #library('AppliedPredictiveModeling')
+
+#download the training and test data. read into data objects
+trainingURL <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+testURL <- 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+if (!file.exists('pml-training.csv')) download.file(trainingURL, 'pml-training.csv') else 'test data present'
+if (!file.exists('pml-test.csv')) download.file(testURL, 'pml-test.csv') else 'training data present'
+
+data <- read.csv('pml-training.csv')
+colnames_data <- colnames(data)
+test <- read.csv('pml-test.csv')
+colnames_test <- colnames(test)
+
+#Confirm both the training and testing data set column names are the same, (excluding the object in each)
+equal <- all.equal(colnames_data[1:length(colnames_data)-1], colnames_test[1:length(colnames_test)-1])
+
+
+if (equal) "Data sets match" else "Data sets don't match"
+rm(trainingURL, testURL)
+```
+
+##Feature Preparation
+The process of preparing and deciding on features is the next step. First a check was done to find null fields (where no data has been entered for any action) and remove them from the data set. This was done to manage the data size. 
+
+```{r features_1}
+#Data Set Preparation.
+# Count the number of non-NAs in each col.
+nonNAs <- function(x) {
+    as.vector(apply(x, 2, function(x) length(which(!is.na(x)))))
+}
+##build a vector of columns with missing data to drop
+colcnts <- nonNAs(data)
+drops <- c()
+for (cnt in 1:length(colcnts)) {
+    if (colcnts[cnt] < nrow(data)) {
+        drops <- c(drops, colnames_data[cnt])
+    }
+}
+
+# Drop NA data and the first 7 columns as they're unnecessary for predicting.
+data <- data[,!(names(data) %in% drops)]
+data <- data[,8:length(colnames(data))]
+```
+
+In the lecture notes there are 2 levels of covariate creation strategies, Level 1 (raw data to covariate) is not required in this project as we are supplied with raw sensor data. The level 2 straegy (covariates to new covariates) is worth completing while being mindful of overfitting. The first step in this process is to check for covariate variability
+
+```{r features_2}
+
+#Identify covariates that have near zero variablility for removal
+nsv <- nearZeroVar(data, saveMetrics=TRUE)
+# nsv
+#Identify covariates that have near zero variablility for removal
+nsv <- nearZeroVar(data, saveMetrics=TRUE)
+nsvkeep <- nsv[nsv$nzv == F,]
+nsvkeep <- rownames(nsvkeep)
+data <- data[,nsvkeep]
+```
+Using the nearZeroVar function in the Caret package covatiates which lack variability, nzv == TRUE, were identified and removed from the dataset.
+
+The provided data was broken into 4 subsets each with a 60/40 split for training and practice testing as below. This was done to allow for more iterations of the training to take place.
+
+```{r data_separation}
+# Divide the given training set into 4 roughly equal sets.
+set.seed(9874653)
+ids_small <- createDataPartition(y=data$classe, p=0.25, list=FALSE)
+small_1 <- data[ids_small,]
+remainder <- data[-ids_small,]
+set.seed(9874653)
+ids_small <- createDataPartition(y=remainder$classe, p=0.33, list=FALSE)
+small_2 <- remainder[ids_small,]
+remainder <- remainder[-ids_small,]
+set.seed(9874653)
+ids_small <- createDataPartition(y=remainder$classe, p=0.5, list=FALSE)
+small_3 <- remainder[ids_small,]
+small_4 <- remainder[-ids_small,]
+# Divide each of these 4 sets into training (60%) and test (40%) sets.
+set.seed(9874653)
+inTrain <- createDataPartition(y=small_1$classe, p=0.6, list=FALSE)
+training_small_1 <- small_1[inTrain,]
+test_small_1 <- small_1[-inTrain,]
+set.seed(9874653)
+inTrain <- createDataPartition(y=small_2$classe, p=0.6, list=FALSE)
+training_small_2 <- small_2[inTrain,]
+test_small_2 <- small_2[-inTrain,]
+set.seed(9874653)
+inTrain <- createDataPartition(y=small_3$classe, p=0.6, list=FALSE)
+training_small_3 <- small_3[inTrain,]
+test_small_3 <- small_3[-inTrain,]
+set.seed(9874653)
+inTrain <- createDataPartition(y=small_4$classe, p=0.6, list=FALSE)
+training_small_4 <- small_4[inTrain,]
+test_small_4 <- small_4[-inTrain,]
+```
+
+##Algorithm
+Based on the Paper [Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.](http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf), Section 5.2 and the discussions on the Coursera Forums the algorithms selected were classification Trees (CART) (method=rpart) and random forest (method=rf) both taken from the caret package implementation.
+
+##Parameters
+The CART (method=rpart) parameters was to be taken from the default settings initially, followed by preprocessing and cross validation to improve accuracy.
+
+While testing against the default settings for the random forest (method=rf) would have been good for consistancy, forum research suggested the processing time required would be extremely lengthy, especially knowing the accuracy wouldn't be good. As such, random forests were completed with cross validation and preprocessing where valuable. 
+
+##Evaluation
+###CART (method = rpart)
+
+Training with the default parameters:
+```{r CART_default}
+#Tree 1 - Default Settings
+set.seed(8746)
+tree_1 <- train(training_small_1$classe ~ ., data = training_small_1, method= 'rpart')
+print(tree_1, digits=3)
+fancyRpartPlot(tree_1$finalModel, digits=3)
+
+#Tree 1 - Evaluated against Test set 1
+set.seed(8746)
+predictions_1 <- predict(tree_1, newdata=test_small_1)
+print(confusionMatrix(predictions_1, test_small_1$classe), digits=3)
+```
+The results of the default CART were rather poor (0.518), showing further processing was required.
+
+```{r CART_preProcess_and_CV}
+#Tree 2 - preprocessing only
+set.seed(8746)
+tree <- train(training_small_1$classe ~ ., preProcess=c('center', 'scale'), data = training_small_1, method= 'rpart')
+print(tree, digits=3)
+
+#Tree 3 - cross validation only
+set.seed(8746)
+tree <- train(training_small_1$classe ~ ., trControl=trainControl(method = "cv", number = 4), data = training_small_1, method= 'rpart')
+print(tree, digits=3)
+
+#Tree 4 - both Preprocessing and cross validation
+set.seed(8746)
+tree <- train(training_small_1$classe ~ ., preProcess=c('center', 'scale'),trControl=trainControl(method = "cv", number = 4), data = training_small_1, method= 'rpart')
+print(tree, digits=3)
+
+#Tree 4 - Evaluated against Test set 1
+set.seed(8746)
+tree_predictions <- predict(tree, newdata=test_small_1)
+print(confusionMatrix(tree_predictions, test_small_1$classe), digits=3)
+```
+When both preprocessing and cross validation was incorportated no improvment over the default settings was found (0.518 default, 0.518 with preprocessing & CV). Because there was no negative impact it was decided to keep both preprocessing and cross validation for testing against the final set.
+
+###Random Forest (method=rf)
+The second alogrithm used was a random forest. based on advice on the Coursera forums processing time against non processed data sets was a barrier so I started by testing against cross validated methods to deterimine the impact of preprocessing.
+
+```{r rf_preprocess_check}
+##Random Forest Training
+#Forest 1.1 - Train on training set 1 with only cross validation.
+set.seed(9856)
+forest <- train(training_small_1$classe ~ ., method="rf", trControl=trainControl(method = "cv", number = 4), data=training_small_1)
+print(forest, digits=3)
+
+#Forest 1.1 - Evaluate against test set
+predictions <- predict(forest, newdata=test_small_1)
+print(confusionMatrix(predictions, test_small_1$classe), digits=4)
+
+#Forest 1.2 - Train on training set 1 with cross validation and preprocessiing.
+set.seed(9856)
+forest <- train(training_small_1$classe ~ ., preProcess=c("center", "scale"), method="rf", trControl=trainControl(method = "cv", number = 4), data=training_small_1)
+print(forest, digits=3)
+
+#Forest 1.2 - Evaluate against test set
+predictions <- predict(forest, newdata=test_small_1)
+print(confusionMatrix(predictions, test_small_1$classe), digits=4)
+```
+This comparasion shows there is no significant impact between the two processes but because there was no negative impact it was decided to keep both preprocessing and cross validation for testing against the final set.
+
+```{r rf_all_training}
+#Forest 2 - Train on training set 2 with cross validation and preprocessiing.
+set.seed(9856)
+forest <- train(training_small_2$classe ~ ., preProcess=c("center", "scale"), method="rf", trControl=trainControl(method = "cv", number = 4), data=training_small_2)
+print(forest, digits=3)
+
+#Forest 2 - Evaluate against test set
+predictions <- predict(forest, newdata=test_small_2)
+print(confusionMatrix(predictions, test_small_2$classe), digits=4)
+
+#Test Forest 2 against provided test set
+print(predict(forest, newdata = test))
+
+#Forest 3 - Train on training set 2 with cross validation and preprocessiing.
+set.seed(9856)
+forest <- train(training_small_3$classe ~ ., preProcess=c("center", "scale"), method="rf", trControl=trainControl(method = "cv", number = 4), data=training_small_3)
+print(forest, digits=3)
+
+#Forest 3 - Evaluate against test set
+predictions <- predict(forest, newdata=test_small_3)
+print(confusionMatrix(predictions, test_small_3$classe), digits=4)
+
+#Test Forest 2 against provided test set
+print(predict(forest, newdata = test))
+
+#Forest 4 - Train on training set 2 with cross validation and preprocessiing.
+set.seed(9856)
+forest <- train(training_small_4$classe ~ ., preProcess=c("center", "scale"), method="rf", trControl=trainControl(method = "cv", number = 4), data=training_small_4)
+print(forest, digits=3)
+
+#Forest 4 - Evaluate against test set
+predictions <- predict(forest, newdata=test_small_4)
+print(confusionMatrix(predictions, test_small_4$classe), digits=4)
+
+#Test Forest 2 against provided test set
+print(predict(forest, newdata = test))
+```
+
+The final model was tested against the Test data set. This final test showed accuracy of  0.9682
+
+###Out of Sample Error
+The Out of Sample Error is defined as the error you get on a new data set. This means for each test the out of sample error was as follows
+*Random Forest (preprocessing and cross validation) Testing Set 1: 1 - 0.9699 = 0.0301
+*Random Forest (preprocessing and cross validation) Testing Set 2: 1 - 0.9614 = 0.0386
+*Random Forest (preprocessing and cross validation) Testing Set 3: 1 - 0.9538 = 0.0462
+*Random Forest (preprocessing and cross validation) Testing Set 4: 1 - 0.9589 = 0.0411
+
+
+##Concusion and Submission
+Looking at the results of against the testing set the all models provided the same result, with the exception of model 4 which had showed class A for item 3 (Rest were Class B). As such the submission was done using the Model 1 results. Because 2 submissions were allowed for each problem I will resubmit problem 3 if it results in an error.
+
+Model 1 B A B A A E D B A A B C B A E E A B B B
+Model 2 B A B A A E D B A A B C B A E E A B B B
+Model 3 B A B A A E D B A A B C B A E E A B B B
+Model 4 B A A A A E D B A A B C B A E E A B B B
+
+The final submission of model 1-3 results returned a 100% accuracy for the assignment, a pleasing result.
